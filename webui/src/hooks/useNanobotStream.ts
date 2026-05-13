@@ -260,6 +260,20 @@ export function useNanobotStream(
         // the full turn (all tool calls + final text) is complete.
         setMessages((prev) => {
           const filtered = activeId ? prev.filter((m) => m.id !== activeId) : prev;
+          // When generated media arrives after stream_end already cleared the
+          // buffer, attach it to the existing streaming placeholder instead of
+          // creating a duplicate message (the text was already delivered via deltas).
+          if (!activeId && hasMedia) {
+            let updated = false;
+            const patched = prev.map((m) => {
+              if (!updated && m.role === "assistant" && m.isStreaming) {
+                updated = true;
+                return { ...m, media };
+              }
+              return m;
+            });
+            if (updated) return patched;
+          }
           const content = ev.buttons?.length ? (ev.button_prompt ?? ev.text) : ev.text;
           return [
             ...filtered,
