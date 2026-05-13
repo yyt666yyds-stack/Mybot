@@ -72,7 +72,8 @@
       "WebSearch",
       "WebFetch(domain:help.aliyun.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "WebFetch(domain:deepwiki.com)"
+      "WebFetch(domain:deepwiki.com)",
+      "Bash(agent-browser --version)"
     ]
   }
 }
