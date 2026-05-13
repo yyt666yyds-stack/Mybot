@@ -251,6 +251,8 @@ class TurnContext:
     pending_queue: asyncio.Queue | None = None
     pending_summary: str | None = None
 
+    use_vision_model: bool = False
+
     trace: list[StateTraceEntry] = field(default_factory=list)
 
 
@@ -424,6 +426,7 @@ class AgentLoop:
         self._register_default_tools()
         if _tc.my.enable:
             self.tools.register(MyTool(loop=self, modify_allowed=_tc.my.allow_set))
+        self._build_vision_snapshot()
         self._runtime_vars: dict[str, Any] = {}
         self._current_iteration: int = 0
         self.commands = CommandRouter()
@@ -588,6 +591,38 @@ class AgentLoop:
                 CronTool(self.cron_service, default_timezone=self.context.timezone or "UTC")
             )
 
+    def _build_vision_snapshot(self) -> None:
+        """Build a ProviderSnapshot for the vision model (auto model switching)."""
+        self._vision_snapshot: ProviderSnapshot | None = None
+        if self._vision_tool is None:
+            return
+        vision_provider_name = self.tools_config.vision.provider
+        vision_model = self.tools_config.vision.model
+        vision_cfg = getattr(self.providers_config, vision_provider_name, None)
+        if not vision_cfg or not vision_cfg.api_key:
+            logger.debug("Vision provider '{}' not configured, skipping auto-switch", vision_provider_name)
+            return
+        from nanobot.providers.openai_compat_provider import OpenAICompatProvider
+
+        vision_provider = OpenAICompatProvider(
+            api_key=vision_cfg.api_key,
+            api_base=vision_cfg.api_base,
+            default_model=vision_model,
+            extra_headers=vision_cfg.extra_headers if vision_cfg else None,
+        )
+        self._vision_snapshot = ProviderSnapshot(
+            provider=vision_provider,
+            model=vision_model,
+            context_window_tokens=self.context_window_tokens,
+            signature=(vision_provider_name, vision_model),
+        )
+        # Remove the describe_image tool since the vision model handles images natively.
+        self.tools.unregister("describe_image")
+        logger.info(
+            "Vision auto-switch ready: {} via {} (describe_image tool disabled)",
+            vision_model, vision_provider_name,
+        )
+
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
         if self._mcp_connected or self._mcp_connecting or not self._mcp_servers:
@@ -734,6 +769,7 @@ class AgentLoop:
         history: list[dict[str, Any]],
         pending_ask_id: str | None,
         pending_summary: str | None,
+        detected_language: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the initial message list for the LLM turn."""
         if pending_ask_id:
@@ -755,6 +791,7 @@ class AgentLoop:
             chat_id=self._runtime_chat_id(msg),
             sender_id=msg.sender_id,
             session_summary=pending_summary,
+            detected_language=detected_language,
         )
 
     async def _dispatch_command_inline(
@@ -819,6 +856,8 @@ class AgentLoop:
         metadata: dict[str, Any] | None = None,
         session_key: str | None = None,
         pending_queue: asyncio.Queue | None = None,
+        provider_override: Any | None = None,
+        model_override: str | None = None,
     ) -> tuple[str | None, list[str], list[dict], str, bool]:
         """Run the agent iteration loop.
 
@@ -871,10 +910,12 @@ class AgentLoop:
                     content, media = extract_documents(content, media)
                     media = media or None
                 user_content = self.context._build_user_content(content, media)
+                detected_lang = session.metadata.get("detected_language") if session else None
                 runtime_ctx = self.context._build_runtime_context(
                     pending_msg.channel,
                     self._runtime_chat_id(pending_msg),
                     self.context.timezone,
+                    detected_language=detected_lang,
                 )
                 if isinstance(user_content, str):
                     merged: str | list[dict[str, Any]] = f"{runtime_ctx}\n\n{user_content}"
@@ -934,6 +975,8 @@ class AgentLoop:
                 retry_wait_callback=on_retry_wait,
                 checkpoint_callback=_checkpoint,
                 injection_callback=_drain_pending,
+                provider_override=provider_override,
+                model_override=model_override,
             ))
         finally:
             reset_file_states(file_state_token)
@@ -1242,6 +1285,7 @@ class AgentLoop:
         history = session.get_history(**_hist_kwargs)
         current_role = "assistant" if is_subagent else "user"
 
+        detected_lang = session.metadata.get("detected_language") if session else None
         messages = self.context.build_messages(
             history=history,
             current_message="" if is_subagent else msg.content,
@@ -1250,6 +1294,7 @@ class AgentLoop:
             current_role=current_role,
             sender_id=msg.sender_id,
             session_summary=pending,
+            detected_language=detected_lang,
         )
         final_content, _, all_msgs, stop_reason, _ = await self._run_agent_loop(
             messages, session=session, channel=channel, chat_id=chat_id,
@@ -1563,10 +1608,27 @@ class AgentLoop:
         ctx.history = ctx.session.get_history(**_hist_kwargs)
 
         pending_ask_id = pending_ask_user_id(ctx.history)
+
+        # Detect and persist the user's language on the first message of a session.
+        lang = ctx.session.metadata.get("detected_language") if ctx.session else None
+        if not lang and ctx.msg.content:
+            from nanobot.utils.helpers import detect_language
+
+            lang = detect_language(ctx.msg.content)
+            if lang and ctx.session:
+                ctx.session.metadata["detected_language"] = lang
+
         ctx.initial_messages = self._build_initial_messages(
-            ctx.msg, ctx.session, ctx.history, pending_ask_id, ctx.pending_summary
+            ctx.msg, ctx.session, ctx.history, pending_ask_id, ctx.pending_summary,
+            detected_language=lang,
         )
-        if ctx.msg.media:
+        if ctx.msg.media and self._vision_snapshot is not None:
+            ctx.use_vision_model = True
+            logger.info(
+                "[vision] auto-switching to {} for this turn ({} images)",
+                self._vision_snapshot.model, len(ctx.msg.media),
+            )
+        if ctx.msg.media and not ctx.use_vision_model:
             ctx.initial_messages = await self._auto_describe_images(
                 ctx.initial_messages, ctx.msg.media
             )
@@ -1582,6 +1644,11 @@ class AgentLoop:
         return "ok"
 
     async def _state_run(self, ctx: TurnContext) -> str:
+        provider_override = None
+        model_override = None
+        if ctx.use_vision_model and self._vision_snapshot is not None:
+            provider_override = self._vision_snapshot.provider
+            model_override = self._vision_snapshot.model
         result = await self._run_agent_loop(
             ctx.initial_messages,
             on_progress=ctx.on_progress,
@@ -1596,6 +1663,8 @@ class AgentLoop:
             metadata=ctx.msg.metadata,
             session_key=ctx.session_key,
             pending_queue=ctx.pending_queue,
+            provider_override=provider_override,
+            model_override=model_override,
         )
         final_content, tools_used, all_msgs, stop_reason, had_injections = result
         ctx.final_content = final_content
@@ -1863,6 +1932,7 @@ class AgentLoop:
         on_progress: Callable[..., Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        on_thinking: Callable[[str], Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         """Process a message directly and return the outbound payload."""
         await self._connect_mcp()
@@ -1876,4 +1946,5 @@ class AgentLoop:
             on_progress=on_progress,
             on_stream=on_stream,
             on_stream_end=on_stream_end,
+            on_thinking=on_thinking,
         )

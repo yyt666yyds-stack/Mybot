@@ -64,7 +64,15 @@
       "Bash(.venv/Scripts/python.exe -m pytest tests/ -x -q)",
       "Bash(echo \"Gateway starting with PID $!\")",
       "Bash(echo \"WebUI starting with PID $!\" sleep 3 netstat -ano)",
-      "Bash(agent-browser close *)"
+      "Bash(agent-browser close *)",
+      "WebFetch(domain:127.0.0.1)",
+      "Bash(agent-browser eval *)",
+      "Bash(.venv/Scripts/python.exe *)",
+      "Bash(where agent-browser *)",
+      "WebSearch",
+      "WebFetch(domain:help.aliyun.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:deepwiki.com)"
     ]
   }
 }

@@ -550,6 +550,7 @@ def serve(
             image_generation_provider_configs={
                 "openrouter": runtime_config.providers.openrouter,
                 "aihubmix": runtime_config.providers.aihubmix,
+                "dashscope": runtime_config.providers.dashscope,
             },
         )
     except ValueError as exc:
@@ -662,6 +663,7 @@ def _run_gateway(
         image_generation_provider_configs={
             "openrouter": config.providers.openrouter,
             "aihubmix": config.providers.aihubmix,
+            "dashscope": config.providers.dashscope,
         },
         provider_snapshot_loader=load_provider_snapshot,
         provider_signature=provider_snapshot.signature,

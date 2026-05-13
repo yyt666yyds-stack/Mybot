@@ -101,6 +101,58 @@ def detect_image_mime(data: bytes) -> str | None:
     return None
 
 
+def detect_language(text: str) -> str | None:
+    """Detect the primary human language from text using Unicode range heuristics.
+
+    Returns a language name like ``"Chinese"``, ``"Japanese"``, ``"Russian"``,
+    or ``None`` if the text is predominantly ASCII (assumed English / European —
+    no hint needed).
+    """
+    if not text or not text.strip():
+        return None
+
+    cjk = 0
+    cyrillic = 0
+    arabic = 0
+    for ch in text:
+        cp = ord(ch)
+        # CJK: Unified Ideographs (CJK + Ext-A) + Hiragana + Katakana + Hangul
+        if (
+            0x4E00 <= cp <= 0x9FFF
+            or 0x3400 <= cp <= 0x4DBF
+            or 0x3040 <= cp <= 0x309F
+            or 0x30A0 <= cp <= 0x30FF
+            or 0xAC00 <= cp <= 0xD7AF
+            or 0x1100 <= cp <= 0x11FF
+        ):
+            cjk += 1
+        elif 0x0400 <= cp <= 0x04FF:
+            cyrillic += 1
+        elif 0x0600 <= cp <= 0x06FF:
+            arabic += 1
+
+    total = cjk + cyrillic + arabic
+    if total == 0:
+        return None
+
+    if cjk >= total * 0.7:
+        has_kana = any(0x3040 <= ord(ch) <= 0x30FF for ch in text)
+        if has_kana:
+            return "Japanese"
+        has_hangul = any(
+            0xAC00 <= ord(ch) <= 0xD7AF or 0x1100 <= ord(ch) <= 0x11FF for ch in text
+        )
+        if has_hangul:
+            return "Korean"
+        return "Chinese"
+    if cyrillic >= total * 0.7:
+        return "Russian"
+    if arabic >= total * 0.7:
+        return "Arabic"
+
+    return None
+
+
 def build_image_content_blocks(
     raw: bytes, mime: str, path: str, label: str
 ) -> list[dict[str, Any]]:

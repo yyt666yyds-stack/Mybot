@@ -66,6 +66,7 @@ class Nanobot:
             image_generation_provider_configs={
                 "openrouter": config.providers.openrouter,
                 "aihubmix": config.providers.aihubmix,
+                "dashscope": config.providers.dashscope,
             },
         )
         return cls(loop)

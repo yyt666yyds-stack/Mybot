@@ -81,6 +81,8 @@ class AgentRunSpec:
     checkpoint_callback: Any | None = None
     injection_callback: Any | None = None
     llm_timeout_s: float | None = None
+    provider_override: Any | None = None
+    model_override: str | None = None
 
 
 @dataclass(slots=True)
@@ -576,7 +578,7 @@ class AgentRunner:
         kwargs: dict[str, Any] = {
             "messages": messages,
             "tools": tools,
-            "model": spec.model,
+            "model": spec.model_override or spec.model,
             "retry_mode": spec.provider_retry_mode,
             "on_retry_wait": spec.retry_wait_callback,
         }
@@ -613,12 +615,13 @@ class AgentRunner:
             messages,
             tools=spec.tools.get_definitions(),
         )
+        provider = spec.provider_override or self.provider
         wants_streaming = hook.wants_streaming()
         wants_progress_streaming = (
             not wants_streaming
             and spec.stream_progress_deltas
             and spec.progress_callback is not None
-            and getattr(self.provider, "supports_progress_deltas", False) is True
+            and getattr(provider, "supports_progress_deltas", False) is True
         )
 
         if wants_streaming:
@@ -632,7 +635,7 @@ class AgentRunner:
                     context.streamed_content = True
                 await hook.on_thinking(context, delta)
 
-            coro = self.provider.chat_stream_with_retry(
+            coro = provider.chat_stream_with_retry(
                 **kwargs,
                 on_content_delta=_stream,
                 on_thinking_delta=_thinking,
@@ -652,12 +655,12 @@ class AgentRunner:
                     context.streamed_content = True
                     await spec.progress_callback(incremental)
 
-            coro = self.provider.chat_stream_with_retry(
+            coro = provider.chat_stream_with_retry(
                 **kwargs,
                 on_content_delta=_stream_progress,
             )
         else:
-            coro = self.provider.chat_with_retry(**kwargs)
+            coro = provider.chat_with_retry(**kwargs)
 
         if timeout_s is None:
             return await coro
@@ -678,7 +681,8 @@ class AgentRunner:
         retry_messages = list(messages)
         retry_messages.append(build_finalization_retry_message())
         kwargs = self._build_request_kwargs(spec, retry_messages, tools=None)
-        return await self.provider.chat_with_retry(**kwargs)
+        provider = spec.provider_override or self.provider
+        return await provider.chat_with_retry(**kwargs)
 
     @staticmethod
     def _usage_dict(usage: dict[str, Any] | None) -> dict[str, int]:
@@ -1121,7 +1125,9 @@ class AgentRunner:
         if not messages or not spec.context_window_tokens:
             return messages
 
-        provider_max_tokens = getattr(getattr(self.provider, "generation", None), "max_tokens", 4096)
+        effective_provider = spec.provider_override or self.provider
+        effective_model = spec.model_override or spec.model
+        provider_max_tokens = getattr(getattr(effective_provider, "generation", None), "max_tokens", 4096)
         max_output = spec.max_tokens if isinstance(spec.max_tokens, int) else (
             provider_max_tokens if isinstance(provider_max_tokens, int) else 4096
         )
@@ -1132,8 +1138,8 @@ class AgentRunner:
             return messages
 
         estimate, _ = estimate_prompt_tokens_chain(
-            self.provider,
-            spec.model,
+            effective_provider,
+            effective_model,
             messages,
             spec.tools.get_definitions(),
         )
