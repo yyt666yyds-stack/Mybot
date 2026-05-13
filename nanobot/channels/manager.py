@@ -325,7 +325,7 @@ class ChannelManager:
         """Send one outbound message without retry policy."""
         if msg.metadata.get("_stream_delta") or msg.metadata.get("_stream_end") or msg.metadata.get("_thinking_delta"):
             await channel.send_delta(msg.chat_id, msg.content, msg.metadata)
-        elif not msg.metadata.get("_streamed"):
+        elif not msg.metadata.get("_streamed") or msg.media:
             await channel.send(msg)
 
     def _coalesce_stream_deltas(
