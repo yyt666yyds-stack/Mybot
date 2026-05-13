@@ -531,6 +531,9 @@ class AnthropicProvider(LLMProvider):
             finish_reason=finish_reason,
             usage=usage,
             thinking_blocks=thinking_blocks or None,
+            reasoning_content="".join(
+                tb["thinking"] for tb in thinking_blocks
+            ) or None,
         )
 
     # ------------------------------------------------------------------
@@ -589,6 +592,7 @@ class AnthropicProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         kwargs = self._build_kwargs(
             messages, tools, model, max_tokens, temperature,
@@ -597,17 +601,29 @@ class AnthropicProvider(LLMProvider):
         idle_timeout_s = int(os.environ.get("NANOBOT_STREAM_IDLE_TIMEOUT_S", "90"))
         try:
             async with self._client.messages.stream(**kwargs) as stream:
-                if on_content_delta:
-                    stream_iter = stream.text_stream.__aiter__()
+                if on_content_delta or on_thinking_delta:
+                    stream_iter = stream.__aiter__()
                     while True:
                         try:
-                            text = await asyncio.wait_for(
+                            event = await asyncio.wait_for(
                                 stream_iter.__anext__(),
                                 timeout=idle_timeout_s,
                             )
                         except StopAsyncIteration:
                             break
-                        await on_content_delta(text)
+                        if (
+                            on_thinking_delta
+                            and event.type == "content_block_delta"
+                            and getattr(event.delta, "type", None) == "thinking_delta"
+                        ):
+                            text = getattr(event.delta, "thinking", None) or ""
+                            await on_thinking_delta(text)
+                        elif (
+                            on_content_delta
+                            and event.type == "content_block_delta"
+                            and getattr(event.delta, "type", None) == "text_delta"
+                        ):
+                            await on_content_delta(event.delta.text)
                 response = await asyncio.wait_for(
                     stream.get_final_message(),
                     timeout=idle_timeout_s,

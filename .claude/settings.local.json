@@ -42,7 +42,29 @@
       "Bash(pkill -f \"nanobot gateway\")",
       "Bash(pkill -f \"nanobot\")",
       "Bash(pkill -f \"vite\")",
-      "Bash(pkill -f \"bun\")"
+      "Bash(pkill -f \"bun\")",
+      "Bash(ls node_modules/.package-lock.json)",
+      "Bash(bun install *)",
+      "Bash(f:/code/Myproject/MyBot/.venv/Scripts/nanobot gateway *)",
+      "Bash(F:/code/Myproject/MyBot/.venv/Scripts/python.exe *)",
+      "Bash(.venv/Scripts/python.exe -m nanobot gateway)",
+      "Bash(agent-browser open *)",
+      "Bash(agent-browser wait *)",
+      "Bash(agent-browser snapshot *)",
+      "Bash(agent-browser click *)",
+      "Bash(agent-browser fill *)",
+      "Bash(agent-browser get *)",
+      "Bash(agent-browser screenshot *)",
+      "Bash(agent-browser skills *)",
+      "Bash(agent-browser console *)",
+      "Bash(agent-browser network *)",
+      "Bash(tasklist *)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -x -q --timeout=60)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -x -q)",
+      "Bash(echo \"Gateway starting with PID $!\")",
+      "Bash(echo \"WebUI starting with PID $!\" sleep 3 netstat -ano)",
+      "Bash(agent-browser close *)"
     ]
   }
 }

@@ -34,12 +34,17 @@ WebUI
   └─ delta → 累积到 message.content，正常流式渲染
 ```
 
-### 修改的文件（12 个）
+### 修改的文件（17 个）
 
 **Python 后端：**
 - `nanobot/utils/helpers.py` — 新增 `extract_thinking_text()` 提取 `<think>` 内部文本
-- `nanobot/providers/base.py` — `chat_stream()` 新增 `on_thinking_delta` 参数
-- `nanobot/providers/openai_compat_provider.py` — 提取 `reasoning_content` 并转发
+- `nanobot/providers/base.py` — `chat_stream()` 和 `chat_stream_with_retry()` 新增 `on_thinking_delta` 参数
+- `nanobot/providers/openai_compat_provider.py` — 提取 `reasoning_content` 并通过 `on_thinking_delta` 转发
+- `nanobot/providers/anthropic_provider.py` — 添加 `on_thinking_delta` 参数；后升级为迭代原始流事件以转发 `thinking_delta`（见问题 4）
+- `nanobot/providers/openai_codex_provider.py` — 同上
+- `nanobot/providers/azure_openai_provider.py` — 同上
+- `nanobot/providers/bedrock_provider.py` — 同上
+- `nanobot/providers/github_copilot_provider.py` — 同上，且转发到 `super().chat_stream()`
 - `nanobot/agent/hook.py` — `AgentHook` 新增 `on_thinking()` 生命周期方法
 - `nanobot/agent/runner.py` — `_thinking` 回调连接 provider → hook
 - `nanobot/agent/loop.py` — `_LoopHook.on_stream()` 双轨拆分 thinking/content；`on_thinking` 线程传递全链路
@@ -54,27 +59,100 @@ WebUI
 
 ---
 
-## 2. WebUI 报 "Error calling LLM: Connection error"
+## 2. WebUI 打不开或连接失败
 
-**问题**：gateway 重启后，WebUI 连接模型失败。
+**问题**：Vite 代理到错误端口，API 返回 `Not Found` 或 WebSocket 连接失败。
 
-**原因**：Vite 开发服务器默认代理到 `http://127.0.0.1:8765`（vite.config.ts 默认值），但 gateway 实际运行在端口 `18790`。
+**原因**：gateway 有两个端口：
+- `18790` — 仅 `/health` 端点（轻量 HTTP 服务）
+- `8765` — API + WebSocket 主服务 + 生产 WebUI
 
-**解决方案**：启动 Vite 时设置环境变量：
+Vite 默认代理到 `8765`，如果错误地设置 `NANOBOT_API_URL=http://127.0.0.1:18790`，会导致无法访问。
+
+**解决方案**：不要设置 `NANOBOT_API_URL`，使用默认值：
 
 ```bash
-NANOBOT_API_URL=http://127.0.0.1:18790 bun run dev
+cd webui && bun run dev   # 默认代理到 8765
 ```
 
 ---
 
-## 3. 端口冲突导致重启失败
+## 3. "[Assistant reply unavailable due to model error.]" — 所有 LLM 调用失败
+
+**问题**：添加 `on_thinking_delta` 参数后，使用 `anthropic` 等非 OpenAI-compatible provider 时报错：
+
+```
+Error calling LLM: AnthropicProvider.chat_stream() got an unexpected keyword argument 'on_thinking_delta'
+```
+
+**原因**：`chat_stream_with_retry()` 将 `on_thinking_delta` 通过 kwargs 传递给所有 provider 的 `chat_stream()`。但只更新了 `base.py` 和 `openai_compat_provider.py`，还有 5 个 provider 有自己的 `chat_stream()` 覆盖实现，未添加该参数。
+
+**解决方案**：为所有覆盖 `chat_stream()` 的 provider 添加 `on_thinking_delta` 参数（默认 `None`，接受但不处理）：
+
+- `nanobot/providers/anthropic_provider.py`
+- `nanobot/providers/openai_codex_provider.py`
+- `nanobot/providers/azure_openai_provider.py`
+- `nanobot/providers/bedrock_provider.py`
+- `nanobot/providers/github_copilot_provider.py`（同时需转发到 `super().chat_stream()`）
+
+---
+
+## 4. 思考内容未显示在 WebUI（anthropic provider 路径）
+
+**问题**：使用 `anthropic` provider 连接 DeepSeek API (`api.deepseek.com/anthropic`) 时，思考内容完全不显示在 WebUI，"思考过程"折叠区域从未出现。
+
+**原因**：DeepSeek 的 Anthropic-compatible 端点将思考内容作为独立的 `thinking` block 返回（Anthropic 原生扩展思考格式），而不是 OpenAI-style 的 `<think>...</think>` 标签。
+
+Anthropic SDK 的 `MessageStream` 有两种事件：
+- `content_block_delta` + `delta.type == "thinking_delta"` → 思考内容流式增量
+- `content_block_delta` + `delta.type == "text_delta"` → 文本内容增量
+
+但 `AnthropicProvider.chat_stream()` 只监听 `stream.text_stream`，它内部**只 yield `text_delta` 事件**，完全忽略了 `thinking_delta`。这意味着思考内容从 API 收到了，但在 provider 层被丢弃。
+
+**解决方案**：修改 `chat_stream()` 迭代原始流事件（`stream.__aiter__()`）而非仅 `text_stream`，将 `thinking_delta` 和 `text_delta` 分别路由到 `on_thinking_delta` 和 `on_content_delta`：
+
+```python
+async with self._client.messages.stream(**kwargs) as stream:
+    if on_content_delta or on_thinking_delta:
+        stream_iter = stream.__aiter__()
+        while True:
+            event = await asyncio.wait_for(stream_iter.__anext__(), timeout=...)
+            if (
+                on_thinking_delta
+                and event.type == "content_block_delta"
+                and getattr(event.delta, "type", None) == "thinking_delta"
+            ):
+                await on_thinking_delta(event.delta.thinking or "")
+            elif (
+                on_content_delta
+                and event.type == "content_block_delta"
+                and getattr(event.delta, "type", None) == "text_delta"
+            ):
+                await on_content_delta(event.delta.text)
+```
+
+同时更新 `_parse_response()` 从 `thinking_blocks` 填充 `reasoning_content`，确保非流式路径也能保留思考内容。
+
+### 修改的文件
+
+- `nanobot/providers/anthropic_provider.py` — `chat_stream()` 迭代原始流而非仅 `text_stream`；`_parse_response()` 填充 `reasoning_content`
+
+### 验证
+
+用 agent-browser 测试确认：
+1. 思考内容实时流式显示为可展开的"思考过程"区域
+2. 思考完成后自动折叠（`expanded=false`）
+3. 最终回复正常渲染
+
+---
+
+## 5. 端口冲突导致启动失败
 
 **问题**：重启 gateway 或 Vite 时报错 `[Errno 10048]` 端口已被占用。
 
 **原因**：旧进程未完全清理，端口 `8765`、`18790`、`5173` 被残留进程占用。
 
-**解决方案**：彻底清理后重启：
+**解决方案**：彻底清理端口后重启：
 
 ```bash
 # 强制终止所有残留进程
@@ -84,7 +162,9 @@ for port in 8765 18790 5173; do
   done
 done
 
-# 然后重新启动
-python -m nanobot gateway &
-NANOBOT_API_URL=http://127.0.0.1:18790 bun run dev
+# 启动 gateway（注意使用 venv python）
+.venv/Scripts/python.exe -m nanobot gateway &
+
+# 启动前端（无需 NANOBOT_API_URL）
+cd webui && bun run dev
 ```
